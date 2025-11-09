@@ -23,9 +23,9 @@ import requests
 import schedule
 from bs4 import BeautifulSoup
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_URL = "https://books.toscrape.com/"
-OUTPUT_DIR = "artifacts"
-OUTPUT_PATH = os.path.join(OUTPUT_DIR, "books_data.txt")
+OUTPUT_PATH = os.path.join(BASE_DIR, "artifacts", "books_data.txt")
 
 
 def get_book_data(book_url: str) -> dict:
@@ -44,22 +44,22 @@ def get_book_data(book_url: str) -> dict:
         title, price, availability, rating, description,
         upc, product_type, price_excl_tax, price_incl_tax,
         tax, availability_count, number_of_reviews.
-
-    Examples
-    --------
-    >>> get_book_data(
-    ... "http://books.toscrape.com/catalogue/a-light-in-the-attic_1000/index.html"
-    ... )
-    {'title': 'A Light in the Attic', 'price': '£51.77', ...}
     """
-    response = requests.get(book_url, timeout=15)
-    response.encoding = "utf-8" if "utf" in response.apparent_encoding.lower() else "ISO-8859-1"
-    response.raise_for_status()
-    soup = BeautifulSoup(response.text, "lxml")
+    with requests.get(book_url, timeout=15) as response:
+        response.encoding = (
+            "utf-8"
+            if "utf" in response.apparent_encoding.lower()
+            else "ISO-8859-1"
+        )
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "lxml")
 
     title = soup.find("div", class_="product_main").h1.get_text(strip=True)
     price = soup.find("p", class_="price_color").get_text(strip=True)
-    availability = soup.find("p", class_="instock availability").get_text(strip=True)
+    availability = soup.find(
+        "p", class_="instock availability"
+    ).get_text(strip=True)
+
     rating = soup.find("p", class_="star-rating")["class"][1]
 
     description_tag = soup.find("div", id="product_description")
@@ -91,27 +91,30 @@ def get_book_data(book_url: str) -> dict:
     }
 
 
-def scrape_books(is_save: bool = True, use_threads: bool = False) -> list[dict]:
+def _fetch_page(
+    session: requests.Session,
+    page_url: str,
+    timeout: int
+) -> list[str]:
+
+    """
+    Возвращает список ссылок на книги с указанной страницы.
+    """
+    with session.get(page_url, timeout=timeout) as response:
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "lxml")
+        return [urljoin(page_url, a["href"]) for a in soup.select("h3 > a")]
+
+
+def scrape_books(  # pylint: disable=too-many-branches, too-many-locals
+    is_save: bool = True,
+    use_threads: bool = False,
+    max_pages: int | None = None,
+    output_path: str | None = None,
+    per_request_timeout: int = 30,
+) -> list[dict]:
     """
     Собирает данные о книгах со всех страниц каталога Books to Scrape.
-
-    Parameters
-    ----------
-    is_save : bool, optional
-        Сохранять ли результат в файл (по умолчанию True).
-    use_threads : bool, optional
-        Использовать ли многопоточность для ускорения парсинга
-        (по умолчанию False — безопасный режим).
-
-    Returns
-    -------
-    list[dict]
-        Список словарей с информацией о книгах.
-
-    Examples
-    --------
-    >>> scrape_books(is_save=False, use_threads=True)
-    [{'title': 'A Light in the Attic', 'price': '£51.77', ...}, ...]
     """
     all_books = []
     page = 1
@@ -123,68 +126,67 @@ def scrape_books(is_save: bool = True, use_threads: bool = False) -> list[dict]:
             if page > 1
             else f"{BASE_URL}index.html"
         )
-        response = session.get(page_url, timeout=10)
-        if response.status_code != 200:
+        try:
+            book_links = _fetch_page(session, page_url, per_request_timeout)
+        except requests.RequestException as exc:
+            print(f"⚠️ Ошибка при загрузке {page_url}: {exc}")
             break
 
-        soup = BeautifulSoup(response.text, "lxml")
-        book_links = [urljoin(page_url, a["href"]) for a in soup.select("h3 > a")]
         if not book_links:
             break
 
         print(f"📄 Page {page} → {len(book_links)} books")
 
         if use_threads:
-            # многопоточный режим
             with ThreadPoolExecutor(max_workers=8) as executor:
-                futures = [executor.submit(get_book_data, link) for link in book_links]
+                futures = [
+                    executor.submit(get_book_data, link)
+                    for link in book_links
+                ]
+
                 for f in as_completed(futures):
                     try:
                         all_books.append(f.result())
-                    except Exception as exc:
-                        print(f"⚠️ Ошибка в потоке: {exc}")
+                    except requests.RequestException as exc:
+                        print(f"⚠️ Ошибка сети в потоке: {exc}")
+                    except (RuntimeError, ExceptionGroup) as exc:
+                        print(f"⚠️ Неожиданная ошибка в потоке: {exc}")
         else:
-            # последовательный режим
             for link in book_links:
                 try:
                     all_books.append(get_book_data(link))
                     time.sleep(0.05)
-                except Exception as exc:
-                    print(f"⚠️ Ошибка при обработке {link}: {exc}")
+                except requests.RequestException as exc:
+                    print(f"⚠️ Ошибка сети при обработке {link}: {exc}")
 
-        next_button = soup.select_one("li.next > a")
+        if max_pages and page >= max_pages:
+            break
+
+        next_button = _fetch_page(session, page_url, per_request_timeout)
         if not next_button:
             break
         page += 1
 
     if is_save:
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        with open(OUTPUT_PATH, "w", encoding="utf-8") as file:
+        save_path = output_path or OUTPUT_PATH
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        with open(save_path, "w", encoding="utf-8") as file:
             for book in all_books:
                 file.write(str(book) + "\n")
-        print(f"\n✅ Сохранено {len(all_books)} книг в {OUTPUT_PATH}")
+        print(f"\n✅ Сохранено {len(all_books)} книг в {save_path}")
 
     return all_books
 
 
 def job() -> None:
-    """
-    Единичный запуск задачи парсинга каталога книг.
-
-    Запускает scrape_books() и сохраняет данные в файл.
-    """
+    """Единичный запуск задачи парсинга каталога книг."""
     print("\n🕖 Запуск задачи парсинга...")
     scrape_books(is_save=True, use_threads=True)
     print("✅ Задача завершена.")
 
 
 def run_scheduler() -> None:
-    """
-    Настраивает ежедневный запуск парсера в 19:00.
-
-    Функция выполняет бесконечный цикл ожидания
-    и проверяет расписание раз в минуту.
-    """
+    """Настраивает ежедневный запуск парсера в 19:00."""
     schedule.every().day.at("19:00").do(job)
     print("📅 Планировщик запущен. Ожидаем 19:00 для запуска задачи...")
 
@@ -194,7 +196,5 @@ def run_scheduler() -> None:
 
 
 if __name__ == "__main__":
-    # По умолчанию однократный запуск с многопоточностью
     job()
-    # Для постоянного расписания раскомментируйте:
     # run_scheduler()

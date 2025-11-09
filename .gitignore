@@ -1,0 +1,30 @@
+# Python: кэш и мусор
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.tmp
+
+# Виртуальные окружения
+venv/
+.venv/
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Частичные/временные артефакты (сам файл с данными НЕ игнорируем)
+artifacts/*.bak
+EOF

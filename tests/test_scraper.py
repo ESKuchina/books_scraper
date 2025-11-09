@@ -60,22 +60,21 @@ def test_get_book_data_content(example_url):
 
 def test_scrape_books_creates_file(tmp_path):
     """
-    Проверяет, что scrape_books создаёт файл и возвращает список данных о книгах.
+    Проверяет, что scrape_books создаёт файл и возвращает непустой список.
+    Используем 1 страницу и временный путь для стабильности.
     """
     test_file = tmp_path / "books_data.txt"
 
-    # Выполняем парсинг в безопасном режиме (без потоков)
-    result = scrape_books(is_save=True, use_threads=False)
+    result = scrape_books(
+        is_save=True,
+        use_threads=False,
+        max_pages=1,
+        output_path=test_file,
+        per_request_timeout=30
+    )
 
-    # Проверяем, что результат — список
-    assert isinstance(result, list), "Функция должна возвращать список"
+    assert isinstance(result, list)
     assert len(result) > 0, "Парсер не собрал книги"
+    assert test_file.exists(), "Файл не создан"
+    assert test_file.stat().st_size > 0, "Файл пуст"
 
-    # Проверяем, что файл сохранён
-    assert os.path.exists("artifacts/books_data.txt") or test_file.exists(), \
-        "Файл books_data.txt не создан"
-
-    # Проверяем, что внутри файла есть строки
-    with open("artifacts/books_data.txt", "r", encoding="utf-8") as f:
-        content = f.read().strip()
-    assert len(content) > 0, "Файл пуст"
